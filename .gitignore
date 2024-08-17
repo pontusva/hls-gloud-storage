@@ -1,3 +1,4 @@
 initAuth.ts
 node_modules
 .env
+lib

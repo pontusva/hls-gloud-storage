@@ -8,20 +8,22 @@ import path from "path";
 import fs from "fs-extra";
 import ffmpeg from "fluent-ffmpeg";
 import { v4 as uuidv4 } from "uuid";
+// import { __dirname, __filename } from "./config";
+
 init;
-ffmpeg.setFfmpegPath(
-  "C:/Users/hyperslap/Downloads/ffmpeg-master-latest-win64-gpl/ffmpeg-master-latest-win64-gpl/bin/ffmpeg"
-);
+// ffmpeg.setFfmpegPath(
+//   "C:/Users/hyperslap/Downloads/ffmpeg-master-latest-win64-gpl/ffmpeg-master-latest-win64-gpl/bin/ffmpeg"
+// );
 const app = express();
 app.use(cors());
 app.use(express.json());
 const port = 3000;
 
-const outputDir = path.join(__dirname, "hls_output");
-// POST endpoint to receive file name and return a streaming URL or token
-
 app.post("/api/request-audio", async (req, res) => {
   const { fileName } = req.body;
+  if (!fileName) {
+    return res.status(400).json({ error: "fileName is required" });
+  }
   try {
     // Generate a unique token and directory name
     const token = crypto.randomBytes(16).toString("hex");
@@ -32,9 +34,11 @@ app.post("/api/request-audio", async (req, res) => {
     await fs.ensureDir(dynamicDirPath);
 
     // Define paths for the audio file and HLS output within this directory
-    const localFilePath = path.join(dynamicDirPath, "temp_audio.mp3");
+    const localFilePath = path.join(dynamicDirPath, fileName);
     const hlsFileName = `${token}.m3u8`;
     const hlsFilePath = path.join(dynamicDirPath, hlsFileName);
+
+    console.log("Expected HLS file path:", hlsFilePath);
 
     // Get the signed URL for the file
     const fileRef = await getStorage()
@@ -61,7 +65,7 @@ app.post("/api/request-audio", async (req, res) => {
     // Wait for the download to finish before proceeding
     fileStream.on("finish", async () => {
       try {
-        // Convert the downloaded MP3 to HLS format
+        // Conversion and upload logic
         await new Promise<void>((resolve, reject) => {
           ffmpeg(localFilePath)
             .outputOptions([
@@ -71,8 +75,13 @@ app.post("/api/request-audio", async (req, res) => {
               "-f hls",
             ])
             .output(hlsFilePath)
-            .on("end", () => {
+            .on("end", async () => {
               console.log("HLS conversion finished.");
+
+              // Remove the original file after conversion
+              await fs.remove(localFilePath);
+              console.log("Original file removed after conversion.");
+
               resolve();
             })
             .on("error", (err) => {
@@ -82,23 +91,18 @@ app.post("/api/request-audio", async (req, res) => {
             .run();
         });
 
-        await fs.remove(localFilePath);
-        // Upload files to cloud storage
+        // Upload files and send the response only after all processes finish
         await uploadFolderToCloudStorage(
-          getStorage().bucket(process.env.BUCKET_NAME), // Correct bucket reference
-          dynamicDirPath, // Local directory where files are stored
-          uniqueDirName // Unique folder name
+          getStorage().bucket(process.env.BUCKET_NAME),
+          dynamicDirPath,
+          uniqueDirName
         );
-
-        // Return the HLS URL to the frontend
         res.json({
-          hlsUrl: `${uniqueDirName}/${hlsFileName}`, // Use the dynamic directory in the URL
+          hlsUrl: `${uniqueDirName}/${hlsFileName}`,
         });
 
-        // Cleanup: Remove the entire dynamic directory after files are uploaded
-
+        // Cleanup: remove the entire directory
         await fs.remove(dynamicDirPath);
-        console.log("Local directory removed successfully");
       } catch (err) {
         console.error("Error processing files:", err);
         res.status(500).send("Error during processing");
@@ -133,12 +137,10 @@ async function uploadFolderToCloudStorage(bucket, localDirPath, folderId) {
     const stat = await fs.stat(localFilePath);
 
     if (stat.isDirectory()) {
-      // Skip directories
       console.log(`Skipping directory: ${localFilePath}`);
       continue;
     }
 
-    // Construct the cloud file path directly under the specified folderId
     const cloudFilePath = normalizePath(`${folderId}/${file}`);
     console.log(
       `Uploading file: ${localFilePath} to cloud path: ${cloudFilePath}`
@@ -146,12 +148,16 @@ async function uploadFolderToCloudStorage(bucket, localDirPath, folderId) {
     const cloudFile = bucket.file(cloudFilePath);
 
     try {
-      // Create a resumable upload session
       const [uploadUrl] = await cloudFile.createResumableUpload();
 
-      // Stream the file to the upload URL
       await new Promise<void>((resolve, reject) => {
         const fileStream = fs.createReadStream(localFilePath);
+
+        fileStream.on("error", (err) => {
+          console.error(`Stream error for file: ${localFilePath}`, err);
+          reject(err);
+        });
+
         axios({
           method: "PUT",
           url: uploadUrl,
@@ -160,16 +166,25 @@ async function uploadFolderToCloudStorage(bucket, localDirPath, folderId) {
           },
           data: fileStream,
         })
-          .then(() => resolve())
-          .catch((error) => reject(error));
+          .then(() => {
+            console.log(`Successfully uploaded: ${localFilePath}`);
+            resolve();
+          })
+          .catch((error) => {
+            console.error(
+              `Error during file upload for: ${localFilePath}`,
+              error
+            );
+            reject(error);
+          });
       });
 
-      // Get a signed URL for the uploaded file
       const [fileUrl] = await cloudFile.getSignedUrl({
         action: "read",
         expires: "03-09-2491",
       });
 
+      console.log(`File uploaded and accessible at: ${fileUrl}`);
       uploadedFiles.push({ fileName: file, url: fileUrl });
     } catch (error) {
       console.error(`Error uploading ${file} to cloud storage:`, error);
@@ -178,38 +193,6 @@ async function uploadFolderToCloudStorage(bucket, localDirPath, folderId) {
 
   return uploadedFiles;
 }
-
-// GET endpoint to stream the audio file using the token or file name
-app.get("/api/stream-audio/:filename", async (req, res) => {
-  const { filename } = req.params;
-
-  // Construct file path
-  const filePath = path.join(outputDir, filename);
-
-  console.log(`Requested file path: ${filePath}`);
-
-  // Check if file exists
-  if (!fs.existsSync(filePath)) {
-    console.error(`File not found: ${filePath}`);
-    return res.status(404).send("File not found");
-  }
-
-  // Set appropriate content type based on the file extension
-  const extname = path.extname(filePath).toLowerCase();
-  const contentType =
-    extname === ".m3u8"
-      ? "application/vnd.apple.mpegurl"
-      : extname === ".ts"
-      ? "audio/mpeg"
-      : "application/octet-stream";
-
-  res.setHeader("Content-Type", contentType);
-  res.setHeader("Accept-Ranges", "bytes");
-
-  // Stream the file
-  const fileStream = fs.createReadStream(filePath);
-  fileStream.pipe(res);
-});
 
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);

@@ -2,9 +2,12 @@
   "name": "firebase-admin",
   "version": "1.0.0",
   "main": "index.js",
+  "type": "commonjs",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "tsx --watch index.ts"
+    "dev": "tsx --watch index.ts",
+    "start": "NODE_OPTIONS='--experimental-specifier-resolution=node' node lib/index.js",
+    "build": "tsc"
   },
   "keywords": [],
   "author": "",
@@ -21,7 +24,6 @@
     "typescript": "^5.5.4"
   },
   "dependencies": {
-    "@google-cloud/storage": "^7.12.1",
     "axios": "^1.7.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -31,6 +33,7 @@
     "form-data": "^4.0.0",
     "fs-extra": "^11.2.0",
     "multer": "^1.4.5-lts.1",
+    "rollup": "^4.20.0",
     "tsx": "^4.16.5",
     "uuid": "^10.0.0"
   }
